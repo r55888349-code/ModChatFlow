@@ -22,12 +22,21 @@ init_manual_stats_table()
 init_slow_mode_table()
 init_moderator_stats_table()
 
+# ========== ПРАВИЛЬНОЕ ЧТЕНИЕ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ==========
 TWITCH_CLIENT_ID = os.getenv("TWITCH_CLIENT_ID")
 TWITCH_CLIENT_SECRET = os.getenv("TWITCH_CLIENT_SECRET")
-REDIRECT_URI = os.getenv("REDIRECT_URI", "http://localhost:8000/auth/callback")  # значение по умолчанию только для локального теста, можно оставить, но лучше убрать
+REDIRECT_URI = os.getenv("REDIRECT_URI", "http://localhost:8000/auth/callback")
 CHAT_BOT_TOKEN = os.getenv("CHAT_BOT_TOKEN")
-CHAT_BOT_NICK = os.getenv("CHAT_BOT_NICK")
-ALLOWED_TWITCH_ID = os.getenv("ALLOWED_TWITCH_ID")
+CHAT_BOT_NICK = os.getenv("CHAT_BOT_NICK", "fellinthoughst")
+ALLOWED_TWITCH_ID = os.getenv("ALLOWED_TWITCH_ID")  
+
+
+if not TWITCH_CLIENT_ID:
+    print("❌ ОШИБКА: TWITCH_CLIENT_ID не задан в переменных окружения")
+if not TWITCH_CLIENT_SECRET:
+    print("❌ ОШИБКА: TWITCH_CLIENT_SECRET не задан в переменных окружения")
+if not CHAT_BOT_TOKEN:
+    print("⚠️ ВНИМАНИЕ: CHAT_BOT_TOKEN не задан, бот не сможет читать чат")
 
 channel_websockets = {}
 readers = {}
@@ -405,6 +414,10 @@ async def startup_event():
     global http_session
     http_session = aiohttp.ClientSession()
     print("✅ HTTP сессия создана")
+    # Выводим значения переменных для проверки (не полные секреты)
+    print(f"TWITCH_CLIENT_ID: {TWITCH_CLIENT_ID[:5] if TWITCH_CLIENT_ID else 'Не задан'}...")
+    print(f"REDIRECT_URI: {REDIRECT_URI}")
+    print(f"CHAT_BOT_NICK: {CHAT_BOT_NICK}")
 
 
 @app.on_event("shutdown")
@@ -485,7 +498,7 @@ async def auth_callback(code: str):
                 user_data = await resp.json()
                 user = user_data["data"][0]
 
-        # ========== ПРОВЕРКА ДОСТУПА (ТОЛЬКО ВАШ ID) ==========
+        # ========== ПРОВЕРКА ДОСТУПА (только если ALLOWED_TWITCH_ID задан) ==========
         if ALLOWED_TWITCH_ID and user["id"] != ALLOWED_TWITCH_ID:
             return HTMLResponse(
                 "<h1>⛔ Доступ запрещён</h1>"
