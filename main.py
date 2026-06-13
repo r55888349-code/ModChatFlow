@@ -22,14 +22,12 @@ init_manual_stats_table()
 init_slow_mode_table()
 init_moderator_stats_table()
 
-# ========== ПРАВИЛЬНОЕ ЧТЕНИЕ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ==========
 TWITCH_CLIENT_ID = os.getenv("TWITCH_CLIENT_ID")
 TWITCH_CLIENT_SECRET = os.getenv("TWITCH_CLIENT_SECRET")
 REDIRECT_URI = os.getenv("REDIRECT_URI", "http://localhost:8000/auth/callback")
 CHAT_BOT_TOKEN = os.getenv("CHAT_BOT_TOKEN")
 CHAT_BOT_NICK = os.getenv("CHAT_BOT_NICK", "fellinthoughst")
-ALLOWED_TWITCH_ID = os.getenv("ALLOWED_TWITCH_ID")  
-
+ALLOWED_TWITCH_ID = os.getenv("ALLOWED_TWITCH_ID")
 
 if not TWITCH_CLIENT_ID:
     print("❌ ОШИБКА: TWITCH_CLIENT_ID не задан в переменных окружения")
@@ -43,7 +41,6 @@ readers = {}
 user_id_cache = {}
 CACHE_TTL = 3600
 reader_creation_locks = defaultdict(asyncio.Lock)
-
 http_session = None
 
 
@@ -60,17 +57,22 @@ def log_chat_message(channel, username, message, msg_id):
 
 def analyze_message(text):
     warnings = []
-    if len(text) > 5 and text.isupper():
-        warnings.append("CAPS")
-    if re.search(r'https?://\S+', text):
+    letters = [c for c in text if c.isalpha()]
+    if letters:
+        upper_percent = sum(1 for c in letters if c.isupper()) / len(letters) * 100
+        if upper_percent >= 80:
+            warnings.append("CAPS")
+    if re.search(r'https?://\S+|www\.\S+', text):
         warnings.append("LINK")
+    if len(text) > 500:
+        warnings.append("LONG")
     return warnings
 
 
 async def get_user_id(username, access_token):
     if not access_token or not username:
         return None
-    cache_key = username
+    cache_key = username.lower()
     if cache_key in user_id_cache:
         cached_id, timestamp = user_id_cache[cache_key]
         if time.time() - timestamp < CACHE_TTL:
@@ -106,7 +108,6 @@ async def get_user_id_from_token(access_token):
     return None
 
 
-# ========== ОТПРАВКА СООБЩЕНИЯ ОТ СВОЕГО ИМЕНИ ==========
 async def send_message_as_user(channel_name, user_token, message_text):
     if not user_token or not message_text or not channel_name:
         return False, "Missing parameters"
@@ -128,7 +129,8 @@ async def send_message_as_user(channel_name, user_token, message_text):
             "sender_id": sender_id,
             "message": message_text[:500]
         }
-        async with http_session.post(url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+        async with http_session.post(url, headers=headers, json=payload,
+                                     timeout=aiohttp.ClientTimeout(total=10)) as resp:
             if resp.status == 200:
                 return True, None
             else:
@@ -153,7 +155,8 @@ async def delete_message(channel_name, message_id, moderator_token):
             "moderator_id": moderator_id,
             "message_id": str(message_id)
         }
-        async with http_session.delete(url, headers=headers, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+        async with http_session.delete(url, headers=headers, params=params,
+                                       timeout=aiohttp.ClientTimeout(total=10)) as resp:
             if resp.status in (200, 204):
                 return True, None
             else:
@@ -173,13 +176,15 @@ async def send_real_ban(channel_name, user_name, moderator_token, reason=""):
         if not broadcaster_id or not moderator_id or not user_id:
             return False, "Не удалось определить ID"
         url = "https://api.twitch.tv/helix/moderation/bans"
-        headers = {"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {moderator_token}", "Content-Type": "application/json"}
+        headers = {"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {moderator_token}",
+                   "Content-Type": "application/json"}
         params = {
             "broadcaster_id": broadcaster_id,
             "moderator_id": moderator_id
         }
         payload = {"data": {"user_id": user_id, "reason": reason[:120]}}
-        async with http_session.post(url, headers=headers, params=params, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+        async with http_session.post(url, headers=headers, params=params, json=payload,
+                                     timeout=aiohttp.ClientTimeout(total=10)) as resp:
             if resp.status == 200:
                 return True, None
             else:
@@ -205,7 +210,8 @@ async def send_real_unban(channel_name, user_name, moderator_token):
             "moderator_id": moderator_id,
             "user_id": user_id
         }
-        async with http_session.delete(url, headers=headers, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+        async with http_session.delete(url, headers=headers, params=params,
+                                       timeout=aiohttp.ClientTimeout(total=10)) as resp:
             if resp.status in (200, 204):
                 return True, None
             else:
@@ -221,7 +227,7 @@ class ChatReader(Client):
         self.channel_name = channel_name.lower()
         self._channel = None
         self._ready = asyncio.Event()
-        self.last_messages = defaultdict(lambda: {"text": "", "count": 0, "timestamp": 0})
+        self.last_messages = {}  # user -> {"text": "", "count": 0, "timestamp": 0, "last_msg_time": 0}
         self.user_last_message_time = defaultdict(float)
         self.bot_token = bot_token
         self.moderator_token = moderator_token
@@ -249,7 +255,8 @@ class ChatReader(Client):
                 "moderator_id": self.moderator_id,
                 "message_id": str(message_id)
             }
-            async with http_session.delete(url, headers=headers, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            async with http_session.delete(url, headers=headers, params=params,
+                                           timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 return resp.status in (200, 204)
         except Exception as e:
             print(f"[DELETE] Ошибка: {e}")
@@ -262,6 +269,9 @@ class ChatReader(Client):
         log_chat_message(self.channel_name, message.author.name, message.content, msg_id)
 
         settings = get_settings(self.channel_name)
+        print(
+            f"🔧 Настройки #{self.channel_name}: caps={settings.get('remove_caps')}({settings.get('caps_percent')}%), repeats={settings.get('remove_repeats')}({settings.get('repeat_count')}), long={settings.get('remove_long')}({settings.get('max_length')})")
+
         is_ignored = (settings.get("ignore_broadcaster") and message.author.is_broadcaster) or \
                      (settings.get("ignore_mods") and message.author.is_mod)
 
@@ -273,7 +283,8 @@ class ChatReader(Client):
                 last_time = self.user_last_message_time.get(message.author.name, 0)
                 if current_time - last_time < sm["interval_sec"]:
                     await self._delete_message_api(msg_id)
-                    print(f"🚫 Авто-удалено (slow mode, {sm['interval_sec']} сек): {message.author.name}: {message.content}")
+                    print(
+                        f"🚫 Авто-удалено (slow mode, {sm['interval_sec']} сек): {message.author.name}: {message.content}")
                     if self.channel_name in channel_websockets:
                         for ws in channel_websockets[self.channel_name]:
                             try:
@@ -299,62 +310,95 @@ class ChatReader(Client):
                 if self.channel_name in channel_websockets:
                     for ws in channel_websockets[self.channel_name]:
                         try:
-                            await ws.send_json({"type": "message_deleted", "message_id": str(msg_id), "user": message.author.name})
+                            await ws.send_json(
+                                {"type": "message_deleted", "message_id": str(msg_id), "user": message.author.name})
                         except:
                             pass
             return
 
-        # Другие правила
+        # ========= ОСНОВНЫЕ ПРАВИЛА АВТОУДАЛЕНИЯ =========
         should_delete = False
         reason = ""
         stat_name = ""
 
-        if not is_ignored:
-            if settings.get("remove_links") and re.search(r'https?://\S+|www\.\S+', message.content):
-                should_delete = True
-                reason = "ссылка"
-                stat_name = "links"
-            elif settings.get("remove_caps"):
-                letters = [c for c in message.content if c.isalpha()]
-                if letters:
-                    upper_count = sum(1 for c in letters if c.isupper())
-                    percent = (upper_count / len(letters)) * 100
-                    if percent >= settings.get("caps_percent", 80):
-                        should_delete = True
-                        reason = f"капс ({percent:.0f}%)"
-                        stat_name = "caps"
-            elif settings.get("remove_long") and len(message.content) > settings.get("max_length", 500):
-                should_delete = True
-                reason = f"длина {len(message.content)} > {settings['max_length']}"
-                stat_name = "long"
-            elif settings.get("remove_repeats"):
-                user = message.author.name
-                current = message.content
-                prev_data = self.last_messages[user]
-                if current == prev_data["text"]:
-                    count = prev_data["count"] + 1
-                else:
-                    count = 1
-                self.last_messages[user] = {"text": current, "count": count, "timestamp": time.time()}
-                if count >= settings.get("repeat_count", 3):
+        # 1. Ссылки
+        if settings.get("remove_links") and re.search(r'https?://\S+|www\.\S+', message.content):
+            should_delete = True
+            reason = "ссылка"
+            stat_name = "links"
+            print(f"[LINK] {message.author.name}: обнаружена ссылка -> УДАЛЕНИЕ")
+
+        # 2. Капс
+        elif settings.get("remove_caps"):
+            letters = [c for c in message.content if c.isalpha()]
+            if letters:
+                upper_count = sum(1 for c in letters if c.isupper())
+                percent = (upper_count / len(letters)) * 100
+                caps_threshold = settings.get("caps_percent", 80)
+                if percent >= caps_threshold:
                     should_delete = True
-                    reason = f"повтор ({count} раз)"
-                    stat_name = "repeats"
+                    reason = f"капс ({percent:.0f}% > {caps_threshold}%)"
+                    stat_name = "caps"
+                    print(f"[CAPS] {message.author.name}: {percent:.0f}% заглавных -> УДАЛЕНИЕ")
+                else:
+                    print(f"[CAPS] {message.author.name}: процент {percent:.0f}% < {caps_threshold}% -> НЕ УДАЛЕНО")
 
+        # 3. Длинные сообщения
+        elif settings.get("remove_long") and len(message.content) > settings.get("max_length", 500):
+            should_delete = True
+            reason = f"длина {len(message.content)} > {settings['max_length']}"
+            stat_name = "long"
+            print(f"[LONG] {message.author.name}: длина {len(message.content)} превышает лимит -> УДАЛЕНИЕ")
+
+        # 4. Повторы (ОТДЕЛЬНЫЙ if, НЕ elif, чтобы проверялось даже если ничего не сработало выше)
+        if not should_delete and settings.get("remove_repeats"):
+            user = message.author.name
+            current = message.content.strip()  # убираем пробелы в начале/конце
+            current_time = time.time()
+            prev = self.last_messages.get(user)
+            timeout = 60  # секунд, можно будет вынести в настройки БД
+            if prev and (current_time - prev.get("last_msg_time", 0)) > timeout:
+                print(f"[REPEAT] Сброс счётчика для {user} (таймаут {timeout} сек)")
+                prev = None
+            if prev and current == prev["text"]:
+                count = prev["count"] + 1
+                print(f"[REPEAT] {user}: повтор #{count}, текст='{current}'")
+            else:
+                count = 1
+                print(f"[REPEAT] {user}: новое сообщение или текст изменился, сброс счётчика")
+            self.last_messages[user] = {
+                "text": current,
+                "count": count,
+                "timestamp": current_time,
+                "last_msg_time": current_time
+            }
+            repeat_threshold = settings.get("repeat_count", 3)
+            if count >= repeat_threshold:
+                should_delete = True
+                reason = f"повтор ({count} раз)"
+                stat_name = "repeats"
+                print(f"[REPEAT] ✅ УДАЛЯЕМ сообщение от {user}, счётчик {count} >= {repeat_threshold}")
+
+        # Применяем удаление
         if should_delete:
-            success = await self._delete_message_api(msg_id)
-            if success:
-                increment_stat(self.channel_name, stat_name)
-                print(f"🚫 Авто-удалено ({reason}): {message.author.name}: {message.content}")
-                if self.channel_name in channel_websockets:
-                    for ws in channel_websockets[self.channel_name]:
-                        try:
-                            await ws.send_json({"type": "message_deleted", "message_id": str(msg_id), "user": message.author.name})
-                        except:
-                            pass
-            return
+            # Для повторов удаляем всегда; для остальных проверяем is_ignored
+            if is_ignored and stat_name in ["links", "caps", "long"]:
+                print(f"⏩ Игнорируем удаление {stat_name} для {message.author.name} (мод/стример)")
+            else:
+                success = await self._delete_message_api(msg_id)
+                if success:
+                    increment_stat(self.channel_name, stat_name)
+                    print(f"🚫 Авто-удалено ({reason}): {message.author.name}: {message.content}")
+                    if self.channel_name in channel_websockets:
+                        for ws in channel_websockets[self.channel_name]:
+                            try:
+                                await ws.send_json(
+                                    {"type": "message_deleted", "message_id": str(msg_id), "user": message.author.name})
+                            except:
+                                pass
+                    return  # сообщение удалено, не отправляем в вебсокет
 
-        # Отправка сообщения в вебсокеты
+        # Если не удалено – отправляем в вебсокет
         warns = get_warns_count(self.channel_name, message.author.name)
         if self.channel_name in channel_websockets:
             for ws in channel_websockets[self.channel_name]:
@@ -409,15 +453,45 @@ async def get_user_avatar(access_token):
     return ""
 
 
+def force_all_settings():
+    """Устанавливает для всех существующих каналов значения автомодерации по умолчанию (включены)"""
+    conn = get_connection()
+    if not conn:
+        return
+    try:
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE settings 
+            SET remove_links = 1, remove_caps = 1, remove_long = 1, remove_repeats = 1,
+                ignore_broadcaster = 0, ignore_mods = 0,
+                caps_percent = 80, max_length = 500, repeat_count = 3
+        ''')
+        cursor.execute('''
+            INSERT OR IGNORE INTO settings (channel, remove_links, remove_caps, remove_long, remove_repeats,
+                                            ignore_broadcaster, ignore_mods, caps_percent, max_length, repeat_count)
+            SELECT DISTINCT channel, 1, 1, 1, 1, 0, 0, 80, 500, 3 FROM automod_stats
+            WHERE channel NOT IN (SELECT channel FROM settings)
+        ''')
+        conn.commit()
+        print("✅ Принудительно обновлены настройки автомодерации для ВСЕХ каналов (правила включены)")
+    except Exception as e:
+        print(f"❌ Ошибка при обновлении настроек: {e}")
+    finally:
+        conn.close()
+
+
 @app.on_event("startup")
 async def startup_event():
     global http_session
     http_session = aiohttp.ClientSession()
     print("✅ HTTP сессия создана")
-    # Выводим значения переменных для проверки (не полные секреты)
+    if not CHAT_BOT_TOKEN or not CHAT_BOT_NICK:
+        print("❌ БОТ НЕ БУДЕТ РАБОТАТЬ: CHAT_BOT_TOKEN или CHAT_BOT_NICK не заданы в .env")
+    else:
+        print(f"🤖 Бот настроен: {CHAT_BOT_NICK}")
+    force_all_settings()
     print(f"TWITCH_CLIENT_ID: {TWITCH_CLIENT_ID[:5] if TWITCH_CLIENT_ID else 'Не задан'}...")
     print(f"REDIRECT_URI: {REDIRECT_URI}")
-    print(f"CHAT_BOT_NICK: {CHAT_BOT_NICK}")
 
 
 @app.on_event("shutdown")
@@ -470,15 +544,15 @@ async def auth_callback(code: str):
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(
-                "https://id.twitch.tv/oauth2/token",
-                params={
-                    "client_id": TWITCH_CLIENT_ID,
-                    "client_secret": TWITCH_CLIENT_SECRET,
-                    "code": code,
-                    "grant_type": "authorization_code",
-                    "redirect_uri": REDIRECT_URI
-                },
-                timeout=aiohttp.ClientTimeout(total=10)
+                    "https://id.twitch.tv/oauth2/token",
+                    params={
+                        "client_id": TWITCH_CLIENT_ID,
+                        "client_secret": TWITCH_CLIENT_SECRET,
+                        "code": code,
+                        "grant_type": "authorization_code",
+                        "redirect_uri": REDIRECT_URI
+                    },
+                    timeout=aiohttp.ClientTimeout(total=10)
             ) as resp:
                 if resp.status != 200:
                     return HTMLResponse("<h1>Ошибка авторизации</h1>", status_code=400)
@@ -489,16 +563,15 @@ async def auth_callback(code: str):
 
         async with aiohttp.ClientSession() as session:
             async with session.get(
-                "https://api.twitch.tv/helix/users",
-                headers={"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {access_token}"},
-                timeout=aiohttp.ClientTimeout(total=10)
+                    "https://api.twitch.tv/helix/users",
+                    headers={"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {access_token}"},
+                    timeout=aiohttp.ClientTimeout(total=10)
             ) as resp:
                 if resp.status != 200:
                     return HTMLResponse("<h1>Ошибка получения данных пользователя</h1>", status_code=400)
                 user_data = await resp.json()
                 user = user_data["data"][0]
 
-        # ========== ПРОВЕРКА ДОСТУПА (только если ALLOWED_TWITCH_ID задан) ==========
         if ALLOWED_TWITCH_ID and user["id"] != ALLOWED_TWITCH_ID:
             return HTMLResponse(
                 "<h1>⛔ Доступ запрещён</h1>"
@@ -645,9 +718,7 @@ async def get_manual_stats_api(channel: str, request: Request):
     if token not in sessions:
         return {"error": "Unauthorized"}, 401
     moderator_id = sessions[token]["id"]
-    print(f"📊 Запрос статистики для канала {channel}, модератор ID: {moderator_id}")
     stats = get_moderator_stats(channel, moderator_id)
-    print(f"   -> bans={stats['bans']}, deletions={stats['deletions']}")
     return {
         "bans": stats["bans"],
         "deletions": stats["deletions"],
@@ -655,7 +726,6 @@ async def get_manual_stats_api(channel: str, request: Request):
     }
 
 
-# ============= СБРОС ПЕРСОНАЛЬНОЙ СТАТИСТИКИ =============
 @app.post("/api/reset_stats/{channel}")
 async def reset_my_stats(channel: str, request: Request):
     token = request.cookies.get("session_token")
@@ -677,7 +747,6 @@ async def reset_my_stats(channel: str, request: Request):
         conn.close()
 
 
-# ============= СБРОС ВСЕЙ СТАТИСТИКИ КАНАЛА =============
 @app.post("/api/reset_all_stats/{channel}")
 async def reset_all_stats(channel: str, request: Request):
     token = request.cookies.get("session_token")
@@ -688,12 +757,10 @@ async def reset_all_stats(channel: str, request: Request):
         return {"error": "DB error"}, 500
     try:
         cursor = conn.cursor()
-        # Сброс автостатистики (automod_stats)
         cursor.execute(
             "UPDATE automod_stats SET links = 0, caps = 0, long = 0, repeats = 0, blacklist = 0, total = 0 WHERE channel = ?",
             (channel.lower(),)
         )
-        # Сброс персональной статистики всех модераторов для этого канала
         cursor.execute("DELETE FROM moderator_stats WHERE channel = ?", (channel.lower(),))
         conn.commit()
         return {"success": True, "message": "Вся статистика канала сброшена"}
@@ -804,6 +871,7 @@ async def websocket_endpoint(websocket: WebSocket, channel: str):
 
     moderator_id = await get_user_id_from_token(moderator_token)
     if not moderator_id:
+        print(f"❌ Не удалось получить moderator_id для #{channel}")
         await websocket.close(code=1008, reason="Cannot determine moderator ID")
         return
 
@@ -832,7 +900,8 @@ async def websocket_endpoint(websocket: WebSocket, channel: str):
                     continue
                 if channel in readers:
                     success = await readers[channel].send_message(text)
-                    await websocket.send_json({"type": "success" if success else "error", "message": "Сообщение отправлено" if success else "Ошибка отправки"})
+                    await websocket.send_json({"type": "success" if success else "error",
+                                               "message": "Сообщение отправлено" if success else "Ошибка отправки"})
             elif action == "send_own_message":
                 text = data.get("text", "").strip()
                 if not text:
@@ -848,12 +917,10 @@ async def websocket_endpoint(websocket: WebSocket, channel: str):
                 if not message_id:
                     await websocket.send_json({"type": "error", "message": "Нет ID сообщения"})
                     continue
-                print(f"🔨 Модератор {moderator_id} совершил действие delete")
                 success, err_msg = await delete_message(channel, message_id, moderator_token)
                 if success:
                     increment_manual_stat(channel, "deletions")
-                    inc_res = increment_moderator_stat(channel, moderator_id, "deletions")
-                    print(f"🗑️ Удаление сообщения: канал={channel}, модератор={moderator_id}, результат={inc_res}")
+                    increment_moderator_stat(channel, moderator_id, "deletions")
                     await websocket.send_json({"type": "success", "deleted": True})
                 else:
                     await websocket.send_json({"type": "error", "message": err_msg})
@@ -863,12 +930,10 @@ async def websocket_endpoint(websocket: WebSocket, channel: str):
                 if not user:
                     await websocket.send_json({"type": "error", "message": "Нет пользователя"})
                     continue
-                print(f"🔨 Модератор {moderator_id} совершил действие ban")
                 success, err_msg = await send_real_ban(channel, user, moderator_token, reason)
                 if success:
                     increment_manual_stat(channel, "bans")
-                    inc_res = increment_moderator_stat(channel, moderator_id, "bans")
-                    print(f"🔨 Бан пользователя {user}: канал={channel}, модератор={moderator_id}, результат={inc_res}")
+                    increment_moderator_stat(channel, moderator_id, "bans")
                     add_banned(channel, user, reason, moderator["display_name"])
                     await websocket.send_json({"type": "success", "message": f"Бан {user}"})
                 else:
@@ -885,7 +950,8 @@ async def websocket_endpoint(websocket: WebSocket, channel: str):
                 else:
                     if "not banned" in err_msg.lower():
                         remove_banned(channel, user)
-                        await websocket.send_json({"type": "success", "message": f"Пользователь {user} не был забанен в Twitch, запись удалена из списка"})
+                        await websocket.send_json({"type": "success",
+                                                   "message": f"Пользователь {user} не был забанен в Twitch, запись удалена из списка"})
                     else:
                         await websocket.send_json({"type": "error", "message": err_msg})
     except WebSocketDisconnect:
